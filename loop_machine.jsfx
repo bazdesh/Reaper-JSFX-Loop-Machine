@@ -1,0 +1,423 @@
+desc:Loop Machine (single-loop guitar looper)
+version:0.1
+tags:looper overdub
+
+// Single-loop looper for REAPER, modelled on the G----r R-g Loop Machine.
+//  - Loop length is a whole number of bars, locked to the project tempo.
+//  - Recording / overdubbing needs the transport to be playing.
+//  - If the transport stops, an existing loop keeps running free (unsynced)
+//    and re-locks to the bar grid when the transport starts again.
+//  - Each overdub pass-set is its own layer: undo / redo removes / restores it.
+//
+// Install: copy to <REAPER resource path>/Effects/ (Options > Show REAPER
+// resource path in explorer/finder), then add "Loop Machine" to a track FX chain.
+
+options:maxmem=128000000
+
+slider1:in_db=0<-24,12,0.1>Input level (dB)
+slider2:in_pan=0<-100,100,1>Input pan (-100 = left, 100 = right)
+slider3:in_mode=0<0,3,1{Stereo,Mono (L+R),Mono (left only),Off}>Input mode
+slider4:out_db=0<-24,12,0.1>Output level (dB)
+slider5:lim_on=1<0,1,1{Off,On}>Output limiter
+slider6:mon_on=1<0,1,1{Off,On}>Monitor live input
+slider7:bars=4<1,64,1>Loop length (bars)
+slider8:start_mode=0<0,2,1{Immediately,Next bar,Level trigger}>Record start
+slider9:trig_db=-30<-60,0,0.5>Trigger threshold (dB)
+
+in_pin:Input L
+in_pin:Input R
+out_pin:Output L
+out_pin:Output R
+
+@init
+ext_noinit = 1;   // don't reset the loop every time the transport starts
+
+ST_EMPTY = 0; ST_ARMED = 1; ST_REC = 2; ST_PLAY = 3; ST_OVD = 4; ST_PAUSE = 5;
+MAXLAYERS = 15;
+// Per-layer bookkeeping (index = layer number). A layer repeats every
+// meta_per samples, so doubling the loop doesn't need to copy any audio.
+meta_start = 0;   // memory 0..15  : position (within the layer) where its data starts
+meta_len = 16;    // memory 16..31 : how many samples of the layer are valid
+meta_per = 32;    // memory 32..47 : the layer's period (loop length when it was recorded)
+meta_base = 48;   // memory 48..63 : memory address of the layer's audio
+LBASE = 64;       // audio memory starts here (2 slots per sample, interleaved L/R)
+CEIL = 0.989;     // limiter ceiling, about -0.1 dBFS
+rel_coef = 1 - exp(-1/(0.08*srate));
+lim_g = 1;
+
+function set_msg(id) (
+  msg_id = id;
+  msg_time = time_precise();
+);
+
+// Called at the moment the base recording starts (loop position 0).
+function begin_base(a) (
+  L = floor(bars*bar_q*spq + 0.5);
+  (L < 1024 || LBASE + 2*L > __memtop()) ? (
+    L = 0; state = ST_EMPTY; set_msg(3);
+  ) : (
+    rec_bars = bars;
+    rec_beats = ts_num;
+    anchor = a;
+    pos = 0; nl = 0; redo = 0;
+    state = ST_REC;
+  );
+);
+
+function do_rec() local(s, nb) (
+  s = state;
+  s == ST_EMPTY ? (
+    playing ? (
+      start_mode == 0 ? (
+        begin_base(bp);
+      ) : (
+        state = ST_ARMED;
+        armed_bar = floor(bp/bar_q);
+      );
+    ) : set_msg(1);
+  );
+  s == ST_ARMED ? ( state = ST_EMPTY; );
+  s == ST_REC ? ( state = ST_EMPTY; nl = 0; L = 0; set_msg(2); );
+  s == ST_PLAY ? (
+    playing ? (
+      nl < MAXLAYERS ? (
+        nb = LBASE;
+        nl > 0 ? nb = meta_base[nl - 1] + 2*meta_per[nl - 1];
+        nb + 2*L <= __memtop() ? (
+          meta_base[nl] = nb;
+          meta_per[nl] = L;
+          meta_start[nl] = pos;
+          meta_len[nl] = 0;
+          nl += 1;
+          redo = 0;
+          state = ST_OVD;
+        ) : set_msg(7);
+      ) : set_msg(4);
+    ) : set_msg(1);
+  );
+  s == ST_OVD ? ( state = ST_PLAY; );
+);
+
+function do_play() local(s) (
+  s = state;
+  (s == ST_PLAY || s == ST_OVD) ? ( state = ST_PAUSE; );
+  s == ST_PAUSE ? ( state = ST_PLAY; resync_needed = 1; );
+);
+
+function do_undo() local(s) (
+  s = state;
+  ((s == ST_PLAY || s == ST_OVD || s == ST_PAUSE) && nl > 1) ? (
+    s == ST_OVD ? state = ST_PLAY;
+    nl -= 1;
+    redo += 1;
+  );
+);
+
+function do_redo() local(s) (
+  s = state;
+  ((s == ST_PLAY || s == ST_PAUSE) && redo > 0) ? (
+    nl += 1;
+    redo -= 1;
+  );
+);
+
+// Double the loop: existing layers simply repeat, so the second half starts
+// out identical to the first and you can overdub something different on it.
+function do_double() local(s) (
+  s = state;
+  (s == ST_PLAY || s == ST_OVD || s == ST_PAUSE) ? (
+    s == ST_OVD ? state = ST_PLAY;
+    L *= 2;
+    rec_bars *= 2;
+  );
+);
+
+function do_clear() (
+  state = ST_EMPTY;
+  nl = 0; redo = 0; L = 0; pos = 0;
+  freembuf(0);
+);
+
+function transport_stopped() (
+  state == ST_ARMED ? ( state = ST_EMPTY; );
+  state == ST_REC ? ( state = ST_EMPTY; nl = 0; L = 0; set_msg(5); );
+  state == ST_OVD ? ( state = ST_PLAY; set_msg(6); );
+);
+
+// ---- GUI helpers ----
+function btn(x, y, w, h, lab, r, g, b, en) local(hov, tw, th, k) (
+  hov = en && mouse_x >= x && mouse_x < x+w && mouse_y >= y && mouse_y < y+h;
+  k = en ? (hov ? 1.2 : 1) : 0.35;
+  gfx_set(min(r*k, 1), min(g*k, 1), min(b*k, 1), 1);
+  gfx_rect(x, y, w, h);
+  gfx_set(1, 1, 1, en ? 1 : 0.4);
+  gfx_measurestr(lab, tw, th);
+  gfx_x = x + (w - tw)/2;
+  gfx_y = y + (h - th)/2;
+  gfx_drawstr(lab);
+  hov && g_click;
+);
+
+// Button that only fires after the mouse has been held down on it for 0.5 s.
+// A white fill sweeps across the button while you hold.
+function hold_btn(x, y, w, h, lab, r, g, b, en) local(hov, frac, fired, tw, th, k) (
+  hov = en && mouse_x >= x && mouse_x < x+w && mouse_y >= y && mouse_y < y+h;
+  (hov && g_click) ? ( g_holding = 1; g_hold_t0 = time_precise(); );
+  (!hov || !(mouse_cap & 1)) ? g_holding = 0;
+  frac = g_holding ? min((time_precise() - g_hold_t0)/0.5, 1) : 0;
+  fired = 0;
+  frac >= 1 ? ( fired = 1; g_holding = 0; frac = 0; );
+  k = en ? (hov ? 1.2 : 1) : 0.35;
+  gfx_set(min(r*k, 1), min(g*k, 1), min(b*k, 1), 1);
+  gfx_rect(x, y, w, h);
+  gfx_set(1, 1, 1, 0.35);
+  gfx_rect(x, y, w*frac, h);
+  gfx_set(1, 1, 1, en ? 1 : 0.4);
+  gfx_measurestr(lab, tw, th);
+  gfx_x = x + (w - tw)/2;
+  gfx_y = y + (h - th)/2;
+  gfx_drawstr(lab);
+  fired;
+);
+
+function txt(x, y, s) (
+  gfx_x = x;
+  gfx_y = y;
+  gfx_drawstr(s);
+);
+
+@slider
+inG = exp(in_db*0.115129255);
+outG = exp(out_db*0.115129255);
+trig = exp(trig_db*0.115129255);
+pan = in_pan*0.01;
+th = (pan + 1)*$pi*0.25;      // constant-power pan for mono sources
+mgl = cos(th);
+mgr = sin(th);
+sgl = pan > 0 ? 1 - pan : 1;  // balance control for stereo sources
+sgr = pan < 0 ? 1 + pan : 1;
+
+@block
+playing = (play_state == 1 || play_state == 5);
+spq = srate*60/tempo;          // samples per quarter note
+invspq = 1/spq;
+bar_q = ts_num*4/ts_denom;     // quarter notes per bar
+bp = beat_position;            // running beat position, advanced per sample
+
+(was_playing && !playing) ? transport_stopped();
+(!was_playing && playing) ? resync_needed = 1;
+was_playing = playing;
+
+c = cmd; cmd = 0;
+c == 1 ? do_rec();
+c == 2 ? do_play();
+c == 3 ? do_undo();
+c == 4 ? do_redo();
+c == 5 ? do_clear();
+c == 6 ? do_double();
+
+// keep the loop locked to the bar grid while the transport plays
+(playing && L > 0 && (state == ST_PLAY || state == ST_OVD)) ? (
+  ps = (bp - anchor)*spq;
+  ps = floor(ps - floor(ps/L)*L);
+  ps >= L ? ps = 0;
+  d = abs(ps - pos);
+  d = min(d, L - d);
+  (resync_needed || d > 48) ? (
+    (state == ST_OVD && !resync_needed) ? ( state = ST_PLAY; set_msg(6); );
+    pos = ps;
+  );
+);
+resync_needed = 0;
+
+@sample
+il = spl0; ir = spl1;
+in_mode == 3 ? (
+  xl = 0;              // input off: nothing is recorded or monitored
+  xr = 0;
+) : in_mode == 0 ? (
+  xl = il*sgl*inG;
+  xr = ir*sgr*inG;
+) : (
+  m = in_mode == 1 ? (il + ir)*0.5 : il;
+  xl = m*mgl*inG;
+  xr = m*mgr*inG;
+);
+pk = max(abs(xl), abs(xr));
+
+playing ? bp += invspq;
+
+// waiting for the start of the base recording
+state == ST_ARMED ? (
+  go = 0;
+  start_mode == 1 ? (
+    floor(bp/bar_q) > armed_bar ? ( go = 1; ga = floor(bp/bar_q)*bar_q; );
+  );
+  start_mode == 2 ? (
+    pk >= trig ? ( go = 1; ga = bp; );
+  );
+  go ? begin_base(ga);
+);
+
+// base recording
+state == ST_REC ? (
+  wp = LBASE + 2*pos;
+  wp[0] = xl;
+  wp[1] = xr;
+  pos += 1;
+  pos >= L ? (
+    pos = 0;
+    nl = 1;
+    meta_start[0] = 0;
+    meta_len[0] = L;
+    meta_per[0] = L;
+    meta_base[0] = LBASE;
+    state = ST_PLAY;
+  );
+);
+
+// playback of all active layers (+ writing the current overdub layer)
+lp_l = 0; lp_r = 0;
+(state == ST_PLAY || state == ST_OVD) ? (
+  i = 0;
+  loop(nl,
+    per = meta_per[i];
+    p = per == L ? pos : pos % per;   // layers recorded before a "double" repeat
+    ln = meta_len[i];
+    ok = 1;
+    ln < per ? (
+      rel = p - meta_start[i];
+      rel < 0 ? rel += per;
+      ok = rel < ln;
+    );
+    ok ? (
+      ptr = meta_base[i] + 2*p;
+      lp_l += ptr[0];
+      lp_r += ptr[1];
+    );
+    i += 1;
+  );
+
+  state == ST_OVD ? (
+    top = nl - 1;
+    wp = meta_base[top] + 2*pos;
+    ln = meta_len[top];
+    ln < L ? (
+      wp[0] = xl; wp[1] = xr;       // first pass over fresh memory: assign
+      meta_len[top] = ln + 1;
+    ) : (
+      wp[0] += xl; wp[1] += xr;     // later passes: sum into the layer
+    );
+  );
+
+  pos += 1;
+  pos >= L ? pos = 0;
+);
+
+// output: live input + loop, output level, zero-latency limiter
+o_l = (mon_on ? xl : 0) + lp_l;
+o_r = (mon_on ? xr : 0) + lp_r;
+o_l *= outG;
+o_r *= outG;
+lim_on ? (
+  op = max(abs(o_l), abs(o_r));
+  lg = op > CEIL ? CEIL/op : 1;
+  lim_g = min(lim_g + (1 - lim_g)*rel_coef, lg);
+  o_l *= lim_g;
+  o_r *= lim_g;
+) : lim_g = 1;
+spl0 = o_l;
+spl1 = o_r;
+
+@gfx 800 190
+gfx_clear = 0x202024;
+g_click = (mouse_cap & 1) && !(g_last & 1);
+g_last = mouse_cap;
+gfx_setfont(1, "Arial", 18);
+
+g_pad = 10;
+g_bw = (gfx_w - 7*g_pad)/6;
+g_bh = 70;
+
+// --- record / overdub button ---
+g_en = 1;
+strcpy(#g_lab, "RECORD");   g_r = 0.75; g_g = 0.15; g_b = 0.15;
+state == ST_ARMED ? ( strcpy(#g_lab, "ARMED"); g_r = 0.80; g_g = 0.65; g_b = 0.10; );
+state == ST_REC   ? ( strcpy(#g_lab, "RECORDING"); g_r = 0.90; g_g = 0.10; g_b = 0.10; );
+state == ST_PLAY  ? ( strcpy(#g_lab, "OVERDUB"); g_r = 0.80; g_g = 0.40; g_b = 0.10; );
+state == ST_OVD   ? ( strcpy(#g_lab, "OVERDUBBING"); g_r = 0.95; g_g = 0.45; g_b = 0.10; );
+state == ST_PAUSE ? ( g_en = 0; );
+btn(g_pad, g_pad, g_bw, g_bh, #g_lab, g_r, g_g, g_b, g_en) ? cmd = 1;
+
+// --- play / pause ---
+g_en = (state == ST_PLAY || state == ST_OVD || state == ST_PAUSE);
+strcpy(#g_lab, "PAUSE");
+state == ST_PAUSE ? strcpy(#g_lab, "PLAY");
+btn(g_pad*2 + g_bw, g_pad, g_bw, g_bh, #g_lab, 0.15, 0.55, 0.25, g_en) ? cmd = 2;
+
+// --- undo / redo ---
+g_en = ((state == ST_PLAY || state == ST_OVD || state == ST_PAUSE) && nl > 1);
+btn(g_pad*3 + g_bw*2, g_pad, g_bw, g_bh, "UNDO", 0.25, 0.40, 0.70, g_en) ? cmd = 3;
+g_en = ((state == ST_PLAY || state == ST_PAUSE) && redo > 0);
+btn(g_pad*4 + g_bw*3, g_pad, g_bw, g_bh, "REDO", 0.25, 0.40, 0.70, g_en) ? cmd = 4;
+
+// --- double the loop ---
+g_en = (state == ST_PLAY || state == ST_OVD || state == ST_PAUSE);
+hold_btn(g_pad*5 + g_bw*4, g_pad, g_bw, g_bh, "HOLD DOUBLE", 0.55, 0.30, 0.65, g_en) ? cmd = 6;
+
+// --- clear ---
+g_en = (state != ST_EMPTY);
+btn(g_pad*6 + g_bw*5, g_pad, g_bw, g_bh, "CLEAR", 0.45, 0.45, 0.50, g_en) ? cmd = 5;
+
+// --- loop position bar ---
+g_y = g_pad + g_bh + 14;
+g_w = gfx_w - 2*g_pad;
+gfx_set(0.30, 0.30, 0.34, 1);
+gfx_rect(g_pad, g_y, g_w, 14);
+(L > 0 && state != ST_EMPTY && state != ST_ARMED) ? (
+  state == ST_REC ? gfx_set(0.90, 0.15, 0.15, 1) : gfx_set(0.30, 0.75, 0.40, 1);
+  gfx_rect(g_pad, g_y, g_w*pos/L, 14);
+);
+
+// --- status text ---
+g_y += 24;
+strcpy(#g_st, "EMPTY");
+state == ST_ARMED ? strcpy(#g_st, "ARMED - waiting for start");
+state == ST_REC   ? strcpy(#g_st, "RECORDING");
+state == ST_PLAY  ? strcpy(#g_st, "PLAYING");
+state == ST_OVD   ? strcpy(#g_st, "OVERDUBBING");
+state == ST_PAUSE ? strcpy(#g_st, "PAUSED");
+gfx_set(1, 1, 1, 1);
+txt(g_pad, g_y, #g_st);
+
+(L > 0 && rec_bars > 0 && state != ST_EMPTY && state != ST_ARMED) ? (
+  g_bl = L/rec_bars;
+  g_cb = min(floor(pos/g_bl) + 1, rec_bars);
+  g_cbt = min(floor((pos - (g_cb - 1)*g_bl)/(g_bl/rec_beats)) + 1, rec_beats);
+  sprintf(#g_t, "Bar %d/%d   Beat %d/%d   Layers %d/%d   (redo: %d)",
+          g_cb, rec_bars, g_cbt, rec_beats, nl, MAXLAYERS, redo);
+  txt(g_pad + 230, g_y, #g_t);
+);
+
+g_y += 24;
+gfx_set(0.75, 0.75, 0.80, 1);
+playing ? strcpy(#g_t, "Transport: playing - loop synced to bars")
+        : strcpy(#g_t, "Transport: stopped - loop (if any) runs free, recording disabled");
+txt(g_pad, g_y, #g_t);
+lim_g < 0.98 ? (
+  gfx_set(1, 0.3, 0.3, 1);
+  txt(gfx_w - 70, g_y, "LIMIT");
+);
+
+// --- transient message ---
+(msg_id > 0 && time_precise() - msg_time < 3) ? (
+  msg_id == 1 ? strcpy(#g_m, "Start the transport first - recording needs the DAW clock.");
+  msg_id == 2 ? strcpy(#g_m, "Recording cancelled.");
+  msg_id == 3 ? strcpy(#g_m, "Loop too long for available memory - shorten it or lower the sample rate.");
+  msg_id == 4 ? strcpy(#g_m, "Maximum number of layers reached - undo or clear.");
+  msg_id == 5 ? strcpy(#g_m, "Transport stopped - recording cancelled.");
+  msg_id == 6 ? strcpy(#g_m, "Overdub ended (transport stopped or jumped).");
+  msg_id == 7 ? strcpy(#g_m, "Not enough memory for another layer - undo, clear, or use a shorter loop.");
+  gfx_set(1, 0.85, 0.3, 1);
+  txt(g_pad, gfx_h - 24, #g_m);
+);
