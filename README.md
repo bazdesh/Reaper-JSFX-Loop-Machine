@@ -3,7 +3,7 @@ Reaper JSFX loop machine
 <img width="917" height="618" alt="image" src="https://github.com/user-attachments/assets/d71310bc-cbaa-4238-ab76-3c88ad1e7edb" />
 
 
-A single-loop looper for reaper, written by claude, in jsfx. Made because I coudlnt get guitar rig 7 and yabridge communicate. 
+A single-loop looper for reaper, written by claude, in jsfx. Made because I coudlnt get guitar rig 7 and yabridge to communicate. 
 Buttons/idea/function based on the Loop Machine in GR7.
 
 features:
