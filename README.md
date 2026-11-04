@@ -19,7 +19,7 @@ features:
 - simple gui, main buttons are big, mouse only
 
 known limits: recording needs the transport running, tempo changes mid-loop will throw the sync off, and loops aren’t saved with the project.
-I have recorded many "records" with the GR5/7 loop machine (https://bazdesh.bandcamp.com/album/repetitions), and this does all I ever needed 
+I have recorded many "records" with the GR5/7 loop machine (https://bazdesh.bandcamp.com/album/siege, https://bazdesh.bandcamp.com/album/repetitions, etc), and this does all I ever needed 
 
 install: drop loop_machine.jsfx into reaper’s Effects folder.
 
