@@ -10,8 +10,8 @@ features:
 
 - one loop, locked to the project tempo, length set in bars
 - record start: immediately, on the next bar, or when you start playing (level trigger)
-- overdub up to 15 layers, with undo and redo per layer (idk, claude wanted some limits because jsfx and memory; this has been more than enough for me, you can theoretically record infinitely into just one layer)
-- hold-to-double button: repeats the loop twice as long so you start with a short lick and then do a longer chord progression over that
+- overdub up to 15 layers, with undo and redo per layer (idk, claude wanted some limits because jsfx and memory; this has been more than enough for me, you can record infinitely into one layer, though without the undos)
+- hold-to-double button: doubles the loop so you can start with a short loop and then do a longer chord progression over that, minimalism style
 - input level, pan, and mode (stereo, mono, or off)
 - output level with a zero-latency limiter
 - live input monitoring on/off
@@ -19,6 +19,7 @@ features:
 - simple gui, main buttons are big, mouse only
 
 known limits: recording needs the transport running, tempo changes mid-loop will throw the sync off, and loops aren’t saved with the project.
+I have recorded many "records" with the GR5/7 loop machine (https://bazdesh.bandcamp.com/album/repetitions), and this does all I ever needed 
 
 install: drop loop_machine.jsfx into reaper’s Effects folder.
 
